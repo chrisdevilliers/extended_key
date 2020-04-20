@@ -1,0 +1,10 @@
+{"1.1.0",
+[{<<"base58">>,{pkg,<<"ae_erl_base58">>,<<"0.0.3">>},0},
+ {<<"libsecp256k1">>,
+  {git,"git@github.com:chrisdevilliers/libsecp256k1.git",
+       {ref,"be8ae60366b19f6254b06e50273e7b1e95d33cdb"}},
+  0}]}.
+[
+{pkg_hash,[
+ {<<"base58">>, <<"5442A3C2A05165336D3F9013E1C0DF0CD36A58843CFC4D1C9C0EFD98F364A1BF">>}]}
+].

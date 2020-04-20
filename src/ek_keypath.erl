@@ -1,4 +1,4 @@
--module(extended_key_keypath).
+-module(ek_keypath).
 
 -export([
          to_list/1

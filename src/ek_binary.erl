@@ -1,4 +1,4 @@
--module(extended_key_binary).
+-module(ek_binary).
 
 -export([
          take/2,

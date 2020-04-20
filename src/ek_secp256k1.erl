@@ -1,6 +1,7 @@
--module(extended_key_crypto_secp256k1).
+-module(ek_secp256k1).
 
 -export([
+         n/0,
          valid_xprv/2,
          valid_xpub/2,
          compress_pubkey/1,
@@ -10,6 +11,9 @@
         ]).
 
 -define(N, 16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141).
+
+
+n() -> ?N.
 
 
 valid_xprv(Key, Il) when is_binary(Key), is_binary(Il) ->

@@ -1,4 +1,4 @@
--module(extended_key_crypto).
+-module(ek_crypto).
 
 -export([
          hash160/1,
