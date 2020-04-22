@@ -1,241 +1,190 @@
 -module(extended_key).
 
 -export([
-         seed/0,
-         seed/1,
-         master/1,
-         master/2,
+         master_private_key/1,
          derive_path/2,
-         derive_child/2,
+         derive_private_child_key/2,
+         derive_public_child_key/2,
+         extended_key_id/1,
          neuter/1,
-         to_string/1,
-         from_string/1,
-         public/1,
-         private/1,
-         hardened/1,
-         normal/1,
-         network/1
+         serialize/2,
+         encode_base58/1
         ]).
 
--define(HARDENED_KEY_START, 16#80000000).
-
--define(MAINNET_XPUB_VERSION, <<16#04, 16#88, 16#B2, 16#1E>>).
--define(MAINNET_XPRV_VERSION, <<16#04, 16#88, 16#AD, 16#E4>>).
--define(TESTNET_XPUB_VERSION, <<16#04, 16#35, 16#87, 16#CF>>).
--define(TESTNET_XPRV_VERSION, <<16#04, 16#35, 16#83, 16#94>>).
-
--record(extended_key, {
-           version            :: binary(),
-           key                :: binary(),
-           chain_code         :: binary(),
-           parent_fingerprint :: binary(),
-           depth              :: integer(),
-           child_num          :: integer()
-          }).
+-define(HARDENED_INDEX_START, 16#80000000).
+-define(N, 16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141).
 
 
-seed() ->
-    seed(32).
+master_private_key(Seed) ->
+    {PrivateKey, ChainCode} = master_key(Seed),
+    #{private_key        => PrivateKey,
+      public_key         => point(PrivateKey),
+      chain_code         => ChainCode,
+      depth              => 0,
+      parent_fingerprint => 0,
+      child_index        => 0}.
 
 
-seed(ByteSize) ->
-    crypto:strong_rand_bytes(ByteSize).
-
-
-master(Seed) ->
-    master(Seed, mainnet).
-
-
-master(Seed, Network) when byte_size(Seed)>=16, byte_size(Seed)=<64 ->
-    <<Key:32/binary, ChainCode:32/binary>> = ek_crypto:hmac_sha512(<<"Bitcoin seed">>, Seed),
-    #extended_key{
-       version            = version(xprv, Network),
-       key                = Key,
-       chain_code         = ChainCode,
-       parent_fingerprint = <<0:32>>,
-       depth              = 0,
-       child_num          = 0
-      };
- 
-master(_Seed, _Network) -> {error, invalid_seed}.
-
-
-derive_path(#extended_key{version=Version} = Master, Path) when Version=:=?MAINNET_XPRV_VERSION; Version=:=?TESTNET_XPRV_VERSION ->
-    case ek_keypath:to_list(Path) of
-        {xprv, Keypath} -> do_derive_path(Master, Keypath);
-        {xpub, Keypath} -> neuter(do_derive_path(Master, Keypath))
-    end;
-
-derive_path(#extended_key{version=Version} = Master, Path) when Version=:=?MAINNET_XPUB_VERSION; Version=:=?TESTNET_XPUB_VERSION ->
-    case ek_keypath:to_list(Path) of
-        {xprv, _}       -> {error, parent_pubkey_to_child_privkey};
-        {xpub, Keypath} -> do_derive_path(Master, Keypath)
-    end.
-
-
-derive_child(#extended_key{depth=Depth, version=Version} = Parent, ChildIndex) when Depth<255 ->
-    case child_key_and_chain_code(Parent, ChildIndex) of
-        {ok, ChildKey, ChildChainCode} ->
-            #extended_key{
-               version            = Version,
-               key                = ChildKey,
-               chain_code         = ChildChainCode,
-               parent_fingerprint = parent_fingerprint(Parent),
-               depth              = Depth + 1,
-               child_num          = ChildIndex
-              };
-        Error ->
-            Error
-    end;
-
-derive_child(_Parent, _ChildIndex) -> {error, invalid_depth}.
-
-
-neuter(#extended_key{version=Version, key=Key} = ExtendedKey) when Version=:=?MAINNET_XPRV_VERSION; Version=:=?TESTNET_XPRV_VERSION ->
-    ExtendedKey#extended_key{
-      version = version(xpub, network(ExtendedKey)),
-      key     = ek_secp256k1:derive_pubkey(Key, compressed)
-     };
-
-neuter(#extended_key{version=Version} = ExtendedKey) when Version=:=?MAINNET_XPUB_VERSION; Version=:=?TESTNET_XPUB_VERSION -> ExtendedKey.
-
-
-to_string({error, Error}) -> {error, Error};
-to_string(#extended_key{} = ExtendedKey) ->
-    ek_base58:version_encode_check(serialize(ExtendedKey)).
-
-
-from_string(KeyString) when is_binary(KeyString) ->
-    deserialize(ek_base58:version_decode_check(KeyString)).
-
-
-public(#extended_key{version=Version}) when Version=:=?MAINNET_XPUB_VERSION; Version=:=?TESTNET_XPUB_VERSION -> true;
-public(#extended_key{}) -> false.
-
-
-private(#extended_key{version=Version}) when Version=:=?MAINNET_XPRV_VERSION; Version=:=?TESTNET_XPRV_VERSION -> true;
-private(#extended_key{}) -> false.
-
-
-hardened(#extended_key{child_num=ChildNum}) when ChildNum>=?HARDENED_KEY_START -> true;
-hardened(#extended_key{}) -> false.
-
-
-normal(#extended_key{child_num=ChildNum}) when ChildNum>=0, ChildNum<?HARDENED_KEY_START -> true;
-normal(#extended_key{}) -> false.
-
-
-network(#extended_key{version=Version}) when Version=:=?MAINNET_XPRV_VERSION; Version=:=?MAINNET_XPUB_VERSION ->
-    mainnet;
-network(#extended_key{version=Version}) when Version=:=?TESTNET_XPRV_VERSION; Version=:=?TESTNET_XPUB_VERSION ->
-    testnet.
-
-
-deserialize(<<Version:4/binary, Depth:8, Fingerprint:4/binary, ChildNum:32, ChainCode:32/binary, KeyData:33/binary>>) ->
-    Key = case private(#extended_key{version=Version}) of
-        true  -> binary:part(KeyData, 1, byte_size(KeyData)-1);  % all but first byte
-        false -> KeyData
+derive_path(MasterKey, Path) ->
+    Elements = binary:split(Path, <<"/">>, [global, trim_all]),
+    ExtendedKey0 = case hd(Elements) of
+        <<"m">> -> MasterKey;
+        <<"M">> -> neuter(MasterKey)
     end,
-    #extended_key{
-       version            = Version,
-       key                = Key,
-       chain_code         = ChainCode,
-       child_num          = ChildNum,
-       parent_fingerprint = Fingerprint,
-       depth              = Depth
-      };
+    lists:foldl(fun(Element, ExtendedKey) ->
+                        Index = case binary:last(Element) of
+                            H when H=:=$h; H=:=$H; H=:=$' ->
+                                erlang:binary_to_integer(binary:part(Element, 0, size(Element)-1)) + ?HARDENED_INDEX_START;
+                            _ ->
+                                erlang:binary_to_integer(Element)
+                        end,
+                        case ExtendedKey of
+                            #{private_key:=_PrivateKey} -> derive_private_child_key(ExtendedKey, Index);
+                            _                           -> derive_public_child_key(ExtendedKey, Index)
+                        end
+                end,
+                ExtendedKey0,
+                tl(Elements)).
 
-deserialize(_) -> {error, invalid_data}.
+
+derive_private_child_key(#{private_key:=PrivateKey, chain_code:=ChainCode, depth:=Depth} = ParentKey, Index) ->
+    {ChildPrivateKey, ChildChainCode} = ckd_priv({PrivateKey, ChainCode}, Index),
+    #{private_key        => ChildPrivateKey,
+      public_key         => point(ChildPrivateKey),
+      chain_code         => ChildChainCode,
+      depth              => Depth + 1,
+      parent_fingerprint => fingerprint(extended_key_id(ParentKey)),
+      child_index        => Index}.
 
 
-serialize(#extended_key{version=Version, key=Key, chain_code=ChainCode, parent_fingerprint=Fingerprint, depth=Depth, child_num=ChildNum} = ExtendedKey) ->
-    KeyData = case private(ExtendedKey) of
-        true  -> <<0, Key:32/binary>>;
-        false -> Key
+derive_public_child_key(#{private_key:=_PrivateKey} = ParentKey, Index) ->
+    neuter(derive_private_child_key(ParentKey, Index));
+
+derive_public_child_key(#{public_key:=PublicKey, chain_code:=ChainCode, depth:=Depth} = ParentKey, Index) ->
+    {ChildPublicKey, ChildChainCode} = ckd_pub({PublicKey, ChainCode}, Index),
+    #{public_key         => ChildPublicKey,
+      chain_code         => ChildChainCode,
+      depth              => Depth + 1,
+      parent_fingerprint => fingerprint(extended_key_id(ParentKey)),
+      child_index        => Index}.
+
+
+extended_key_id(#{public_key:=PublicKey}) ->
+    crypto:hash(ripemd160, crypto:hash(sha256, ser_P(PublicKey))).
+
+
+neuter(#{private_key:=_PrivateKey} = ExtendedKey) ->
+    maps:remove(private_key, ExtendedKey);
+
+neuter(ExtendedKey) ->
+    ExtendedKey.
+
+
+serialize(Version, #{private_key:=PrivateKey, chain_code:=ChainCode, depth:=Depth, parent_fingerprint:=ParentFingerprint, child_index:=ChildIndex}) ->
+    PrivateKey_ = ser_256(PrivateKey),
+    serialize(Version, Depth, ParentFingerprint, ser_32(ChildIndex), ChainCode, <<0:8, PrivateKey_/binary>>);
+
+serialize(Version, #{public_key:=PublicKey, chain_code:=ChainCode, depth:=Depth, parent_fingerprint:=ParentFingerprint, child_index:=ChildIndex}) ->
+    serialize(Version, Depth, ParentFingerprint, ser_32(ChildIndex), ChainCode, ser_P(PublicKey)).
+
+
+% FIXME
+encode_base58(#{private_key:=_PrivateKey} = ExtendedKey) ->
+    ek_base58:version_encode_check(serialize(16#0488ADE4, ExtendedKey));
+
+encode_base58(ExtendedKey) ->
+    ek_base58:version_encode_check(serialize(16#0488B21E, ExtendedKey)).
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+ckd_priv({K_par, C_par}, Idx) ->
+    I = case Idx >= ?HARDENED_INDEX_START of
+        true  -> crypto:hmac(sha512, C_par, [<<0:8>>, ser_256(K_par), ser_32(Idx)]);
+        false -> crypto:hmac(sha512, C_par, [ser_P(point(K_par)), ser_32(Idx)])
     end,
-    <<Version:4/binary, Depth:8, Fingerprint:4/binary, ChildNum:32, ChainCode:32/binary, KeyData:33/binary>>.
+    {I_L, I_R} = split(I),
+    I_L_ = parse_256(I_L),
+    if I_L_ >= ?N -> throw(error); true -> ok end,
+    K_i = (I_L_ + K_par) rem ?N,
+    if K_i == 0 -> throw(error); true -> ok end,
+    C_i = I_R,
+    {K_i, C_i}.
 
 
-% Private parent key → private child key - hardened child
-% Private parent key → private child key - normal child
-child_key_and_chain_code(#extended_key{version=Version, key=ParentKey} = Parent, ChildIndex) when Version=:=?MAINNET_XPRV_VERSION; Version=:=?TESTNET_XPRV_VERSION ->
-    {ok, Il, ChildChainCode} = il_and_ir(Parent, ChildIndex),
-    Rem = ek_binary:unsigned_sum(Il, ParentKey) rem ek_secp256k1:n(),
-    ChildKey = <<Rem:256>>,
+ckd_pub({_, _}, Idx) when Idx >= ?HARDENED_INDEX_START ->
+    throw(undefined_for_hardened_children);
 
-    case ek_secp256k1:valid_xprv(ChildKey, Il) of
-        true  -> {ok, ChildKey, ChildChainCode};
-        false -> {error, invalid_child}
-    end;
-
-% Public parent key → public child key - hardened child
-% Public parent key → public child key - normal child
-child_key_and_chain_code(#extended_key{version=Version, key=ParentKey} = Parent, ChildIndex) when Version=:=?MAINNET_XPUB_VERSION; Version=:=?TESTNET_XPUB_VERSION ->
-    DeriveChildKey = fun(PK, Il) ->
-                             ek_secp256k1:compress_pubkey(
-                               ek_secp256k1:pubkey_tweak_add(
-                                 ek_secp256k1:decompress_pubkey(PK), 
-                                 Il
-                               )
-                             )
-                     end,
-
-    case il_and_ir(Parent, ChildIndex) of
-        {ok, Il, ChildChainCode} ->
-            case DeriveChildKey(ParentKey, Il) of
-                ChildKey when is_binary(ChildKey) ->
-                    case ek_secp256k1:valid_xpub(ChildKey, Il) of
-                        true -> {ok, ChildKey, ChildChainCode};
-                        _    -> error
-                    end;
-                _ -> error
-            end;
-        _ -> error
-    end.
+ckd_pub({K_par, C_par}, Idx) ->
+    I = crypto:hmac(sha512, C_par, [ser_P(K_par), ser_32(Idx)]),
+    {I_L, I_R} = split(I),
+    I_L_ = parse_256(I_L),
+    if I_L_ >= ?N -> throw(error); true -> ok end,
+    K_i = case libsecp256k1:ec_pubkey_tweak_add(uncompressed_pubkey(K_par), I_L) of
+        {ok, K_i_} ->
+            ok = libsecp256k1:ec_pubkey_verify(K_i_),  % does this check for the point at infinity?
+            coordinate_pair(K_i_);
+        _ ->
+            throw(error)
+    end,
+    C_i = I_R,
+    {K_i, C_i}.
 
 
-parent_fingerprint(#extended_key{key=Key, version=Version}) when Version=:=?MAINNET_XPRV_VERSION; Version=:=?TESTNET_XPRV_VERSION ->
-    ek_binary:take(ek_crypto:hash160(ek_secp256k1:derive_pubkey(Key, compressed)), 4);
-
-parent_fingerprint(#extended_key{key=Key, version=Version}) when Version=:=?MAINNET_XPUB_VERSION; Version=:=?TESTNET_XPUB_VERSION ->
-    ek_binary:take(ek_crypto:hash160(Key), 4).
+fingerprint(ExtendedKeyId) ->
+    <<Fingerprint:32, _/binary>> = ExtendedKeyId,
+    Fingerprint.
 
 
-i_data(#extended_key{version=Version, key=ParentKey}, ChildIndex) when ChildIndex>=?HARDENED_KEY_START, 
-                                                                       Version=:=?MAINNET_XPRV_VERSION orelse Version=:=?TESTNET_XPRV_VERSION ->
-    <<0, ParentKey:32/binary, ChildIndex:32>>;
-
-i_data(#extended_key{version=Version, key=ParentKey}, ChildIndex) when ChildIndex>=0 andalso ChildIndex<?HARDENED_KEY_START,
-                                                                       Version=:=?MAINNET_XPRV_VERSION orelse Version=:=?TESTNET_XPRV_VERSION ->
-    Pubkey = ek_secp256k1:derive_pubkey(ParentKey, compressed),
-    <<Pubkey:33/binary, ChildIndex:32>>;
-
-i_data(#extended_key{version=Version}, ChildIndex) when ChildIndex>=?HARDENED_KEY_START, 
-                                                        Version=:=?MAINNET_XPUB_VERSION orelse Version=:=?TESTNET_XPUB_VERSION ->
-    {error, 'HCKD_from_public'};
-
-i_data(#extended_key{version=Version, key=ParentKey}, ChildIndex) when ChildIndex>=0 andalso ChildIndex<?HARDENED_KEY_START,
-                                                                       Version=:=?MAINNET_XPUB_VERSION orelse Version=:=?TESTNET_XPUB_VERSION ->
-    <<ParentKey:33/binary, ChildIndex:32>>.
+serialize(Version, Depth, ParentFingerprint, ChildNumber, ChainCode, KeyData) ->
+    <<Version:32, Depth:8, ParentFingerprint:32, ChildNumber:4/binary, ChainCode:32/binary, KeyData:33/binary>>.
 
 
-il_and_ir(#extended_key{chain_code=ParentChainCode} = Parent, ChildIndex) ->
-    case i_data(Parent, ChildIndex) of
-        Data when is_binary(Data) ->
-            <<Il:32/binary, Ir:32/binary>> = ek_crypto:hmac_sha512(ParentChainCode, Data),
-            {ok, Il, Ir};
-        {error, Error} ->
-            {error, Error}
-    end.
+master_key(Seed) ->
+    I = crypto:hmac(sha512, <<"Bitcoin seed">>, Seed),
+    {I_L, I_R} = split(I),
+    I_L_ = parse_256(I_L),
+    if I_L_ == 0 orelse I_L_ >= ?N -> throw(error); true -> ok end,
+    K = I_L_,
+    C = I_R,
+    {K, C}.
 
 
-do_derive_path({error, Error}, _) -> {error, Error};
-do_derive_path(Key, []) -> Key;
-do_derive_path(Key, [ChildIndex | Rest]) ->
-    do_derive_path(derive_child(Key, ChildIndex), Rest).
+split(I) ->
+    I_L = binary:part(I, 0, 32),
+    I_R = binary:part(I, 32, 32),
+    {I_L, I_R}.
 
 
-version(xprv, mainnet) -> ?MAINNET_XPRV_VERSION;
-version(xpub, mainnet) -> ?MAINNET_XPUB_VERSION;
-version(xprv, testnet) -> ?TESTNET_XPRV_VERSION;
-version(xpub, testnet) -> ?TESTNET_XPUB_VERSION.
+point(P) ->
+    PrivKey = <<P:256>>,
+    {ok, PubKey} = libsecp256k1:ec_pubkey_create(PrivKey, uncompressed),
+    coordinate_pair(PubKey).
+
+
+coordinate_pair(<<4:8, X:256, Y:256>>) ->
+    {X, Y}.
+
+
+uncompressed_pubkey({X, Y}) ->
+    <<4:8, X:256, Y:256>>.
+
+
+ser_32(I) ->
+    <<I:32>>.
+
+
+ser_256(P) ->
+    <<P:256>>.
+
+
+ser_P({X, Y}) ->
+    Header = if Y rem 2 == 0 -> <<2:8>>; true -> <<3:8>> end,
+    X_ = ser_256(X),
+    <<Header/binary, X_/binary>>.
+
+
+parse_256(P) ->
+    <<N:256>> = P,
+    N.
